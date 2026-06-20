@@ -1,0 +1,47 @@
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: always
+
+spring:
+  application:
+    name: ms-gestion
+  datasource:
+    url: ${DB_GESTION_URL:jdbc:postgresql://pg-26c06432-cesarmaldonadomecanicodae13-b1f5.a.aivencloud.com:20436/defaultdb?sslmode=require}
+    username: ${DATABASE_USERNAME:avnadmin}
+    password: ${DATABASE_PASSWORD:AVNS_pYbx3ZFApq7AA_T_Qyh}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 3
+      minimum-idle: 1
+      connection-timeout: 30000
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+services:
+  ms-inventario:
+    url: ${MS_INVENTARIO_URL:http://localhost:8094/api/v1}
+
+logging:
+  level:
+    com.fitproject.gestion: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

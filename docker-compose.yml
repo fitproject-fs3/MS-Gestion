@@ -1,0 +1,18 @@
+services:
+  ms-gestion:
+    build: .
+    container_name: fit-gestion-service
+    restart: unless-stopped
+    environment:
+      DB_GESTION_URL: ${DB_GESTION_URL:-jdbc:postgresql://fit-postgres:5432/gestion_db}
+      DATABASE_USERNAME: ${DATABASE_USERNAME:-fit_user}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-fit_pass}
+      SERVER_PORT: 8080
+    ports:
+      - "8080:8080"
+    networks:
+      - fit-network
+
+networks:
+  fit-network:
+    external: true

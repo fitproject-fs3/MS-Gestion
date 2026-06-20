@@ -1,0 +1,15 @@
+target/
+*.class
+*.log
+*.jar
+*.war
+*.ear
+.idea/
+*.iml
+.settings/
+.classpath
+.project
+.springBeans
+.sts4-cache/
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
