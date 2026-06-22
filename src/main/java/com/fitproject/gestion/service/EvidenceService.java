@@ -26,6 +26,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+/**
+ * Servicio de negocio central para la gestión de evidencias fotográficas en MS-Gestion.
+ *
+ * <p>Implementa el ciclo de vida completo de una {@link Evidence}: creación mediante
+ * el patrón Factory Method, subida por trabajador, aprobación/rechazo por supervisor
+ * y eliminación. Cada mutación recalcula automáticamente el progreso del
+ * {@link ConstructionStep} y del {@link Project} padre.</p>
+ *
+ * <p>Al aprobar una evidencia, publica el evento {@code evidence.approved} en el
+ * exchange {@code fit.notifications} de RabbitMQ para que MS-Notificaciones
+ * envíe el email de confirmación al trabajador.</p>
+ *
+ * @see com.fitproject.gestion.factory.EvidenceFactory
+ * @see com.fitproject.gestion.controller.EvidenceController
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -41,6 +56,12 @@ public class EvidenceService {
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /**
+     * Retorna todas las evidencias asociadas a un paso de construcción.
+     *
+     * @param stepId identificador UUID del paso de construcción
+     * @return lista de evidencias del paso, vacía si no existen
+     */
     @Transactional(readOnly = true)
     public List<EvidenceDTO> getByStep(String stepId) {
         return evidenceRepository.findByStep_StepId(stepId).stream()
@@ -84,6 +105,19 @@ public class EvidenceService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Crea una nueva evidencia usando el patrón Factory Method para seleccionar
+     * la fábrica apropiada en tiempo de ejecución.
+     *
+     * <p>Si {@code req.assignedWorkerId} no es nulo ni vacío, se usa
+     * {@link com.fitproject.gestion.factory.WorkerTaskEvidenceFactory} (asignación de tarea);
+     * de lo contrario se usa {@link com.fitproject.gestion.factory.DirectSubmissionEvidenceFactory}
+     * (subida directa). El progreso del paso se recalcula tras la creación.</p>
+     *
+     * @param req DTO con los datos de la evidencia a crear
+     * @return evidencia persistida como DTO
+     * @throws IllegalArgumentException si el paso o el proyecto referenciado no existen
+     */
     @Transactional
     public EvidenceDTO submit(EvidenceDTO req) {
         ConstructionStep step = stepRepository.findById(req.getStepId())
@@ -164,6 +198,15 @@ public class EvidenceService {
         return toDTO(evidence);
     }
 
+    /**
+     * Aprueba una evidencia, recalcula el progreso del paso y publica el evento
+     * {@code evidence.approved} en RabbitMQ para notificar al trabajador por email.
+     *
+     * @param evidenceId   identificador UUID de la evidencia a aprobar
+     * @param supervisorId identificador del supervisor que aprueba
+     * @return evidencia actualizada con estado {@code APPROVED}
+     * @throws IllegalArgumentException si la evidencia o su proyecto no existen
+     */
     @Transactional
     public EvidenceDTO approve(String evidenceId, String supervisorId) {
         Evidence evidence = findById(evidenceId);
@@ -215,6 +258,14 @@ public class EvidenceService {
         }
     }
 
+    /**
+     * Rechaza una evidencia y recalcula el progreso del paso padre.
+     *
+     * @param evidenceId   identificador UUID de la evidencia a rechazar
+     * @param supervisorId identificador del supervisor que rechaza
+     * @return evidencia actualizada con estado {@code REJECTED}
+     * @throws IllegalArgumentException si la evidencia o su proyecto no existen
+     */
     @Transactional
     public EvidenceDTO reject(String evidenceId, String supervisorId) {
         Evidence evidence = findById(evidenceId);
@@ -228,6 +279,12 @@ public class EvidenceService {
         return toDTO(evidence);
     }
 
+    /**
+     * Elimina una evidencia y recalcula el progreso del paso y proyecto asociados.
+     *
+     * @param evidenceId identificador UUID de la evidencia a eliminar
+     * @throws IllegalArgumentException si la evidencia o su proyecto no existen
+     */
     @Transactional
     public void delete(String evidenceId) {
         Evidence evidence = findById(evidenceId);
@@ -256,6 +313,13 @@ public class EvidenceService {
                 .orElseThrow(() -> new IllegalArgumentException("Evidencia no encontrada: " + evidenceId));
     }
 
+    /**
+     * Convierte la entidad {@link Evidence} a su representación DTO para la API.
+     * Deserializa el campo JSON {@code insumosUsados} si está presente.
+     *
+     * @param e entidad JPA de la evidencia
+     * @return DTO con todos los campos mapeados, listo para serializar hacia el cliente
+     */
     public EvidenceDTO toDTO(Evidence e) {
         List<InsumoUsadoDTO> insumosList = null;
         if (e.getInsumosUsados() != null && !e.getInsumosUsados().isBlank()) {
