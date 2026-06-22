@@ -24,6 +24,7 @@ import org.springframework.data.domain.PageRequest;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -208,6 +209,19 @@ class EvidenceServiceTest {
                 .hasMessageContaining("Paso no encontrado");
     }
 
+    @Test
+    @DisplayName("submit: lanza excepción si el proyecto referenciado no existe")
+    void submit_projectNotFound_throwsException() {
+        EvidenceDTO req = EvidenceDTO.builder()
+                .projectId("proj-xxx").stepId("step-1").name("Foto").submittedBy("s1").build();
+        when(stepRepository.findById("step-1")).thenReturn(Optional.of(step));
+        when(projectRepository.findById("proj-xxx")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> evidenceService.submit(req))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Proyecto no encontrado");
+    }
+
     // ─── approve ──────────────────────────────────────────────────────────────
 
     @Test
@@ -242,6 +256,24 @@ class EvidenceServiceTest {
     // ─── reject ───────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("approve: el paso llega a 100% cuando todas las evidencias son APPROVED")
+    void approve_allEvidencesApproved_markStepAsCompleted() {
+        // 1 evidencia total → 1 aprobada → progreso = 100% → stepStatus = true
+        evidence.setStatus(EvidenceStatus.APPROVED);
+        when(evidenceRepository.findById("ev-1")).thenReturn(Optional.of(evidence));
+        when(evidenceRepository.save(evidence)).thenReturn(evidence);
+        when(projectRepository.findById("proj-1")).thenReturn(Optional.of(project));
+        when(evidenceRepository.findByStep_StepId("step-1")).thenReturn(List.of(evidence));
+        when(stepRepository.save(step)).thenReturn(step);
+        when(projectRepository.save(project)).thenReturn(project);
+
+        evidenceService.approve("ev-1", "sup1");
+
+        assertThat(step.getProgressValue()).isEqualTo(100);
+        assertThat(step.isStepStatus()).isTrue();
+    }
+
+    @Test
     @DisplayName("reject: cambia estado a REJECTED y recalcula progreso")
     void reject_success_updatesStatusToRejected() {
         when(evidenceRepository.findById("ev-1")).thenReturn(Optional.of(evidence));
@@ -254,6 +286,16 @@ class EvidenceServiceTest {
         EvidenceDTO result = evidenceService.reject("ev-1", "supervisor1");
 
         assertThat(result.getStatus()).isEqualTo("REJECTED");
+    }
+
+    @Test
+    @DisplayName("reject: lanza excepción si la evidencia no existe")
+    void reject_notFound_throwsException() {
+        when(evidenceRepository.findById("ev-xxx")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> evidenceService.reject("ev-xxx", "sup1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Evidencia no encontrada");
     }
 
     // ─── delete ───────────────────────────────────────────────────────────────
@@ -324,5 +366,42 @@ class EvidenceServiceTest {
         assertThat(result).isNotNull();
         verify(evidenceRepository).save(evidence);
         verify(eventPublisher).publishEvent(any());
+    }
+
+    @Test
+    @DisplayName("workerSubmit: descuenta inventario y publica evento cuando hay insumos")
+    void workerSubmit_withInsumos_callsInventarioClientAndPublishesEvent() {
+        InsumoUsadoDTO insumo = InsumoUsadoDTO.builder()
+                .insumoId("insumo-1").nombre("Cemento").cantidad(5).build();
+
+        when(evidenceRepository.findById("ev-1")).thenReturn(Optional.of(evidence));
+        when(evidenceRepository.save(evidence)).thenReturn(evidence);
+        // consumir() retorna Map, no es void — se usa thenReturn
+        when(inventarioClient.consumir(anyString(), anyMap())).thenReturn(Map.of());
+
+        EvidenceDTO result = evidenceService.workerSubmit(
+                "ev-1", "https://s3.img.jpg", "Instalación completada", List.of(insumo));
+
+        assertThat(result).isNotNull();
+        verify(inventarioClient).consumir(eq("insumo-1"), anyMap());
+        verify(eventPublisher).publishEvent(any());
+    }
+
+    @Test
+    @DisplayName("workerSubmit: lanza IllegalStateException cuando el inventario no tiene stock")
+    void workerSubmit_insufficientStock_throwsIllegalStateException() {
+        InsumoUsadoDTO insumo = InsumoUsadoDTO.builder()
+                .insumoId("insumo-1").nombre("Acero").cantidad(100).build();
+
+        // FeignException.Conflict no tiene constructor vacío → se crea con mock()
+        feign.FeignException.Conflict conflictEx = mock(feign.FeignException.Conflict.class);
+
+        when(evidenceRepository.findById("ev-1")).thenReturn(Optional.of(evidence));
+        when(inventarioClient.consumir(anyString(), anyMap())).thenThrow(conflictEx);
+
+        assertThatThrownBy(() -> evidenceService.workerSubmit(
+                "ev-1", "https://s3.img.jpg", "desc", List.of(insumo)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Stock insuficiente");
     }
 }
