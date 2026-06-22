@@ -5,18 +5,28 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fitproject.gestion.client.InventarioClient;
 import com.fitproject.gestion.dto.EvidenceDTO;
 import com.fitproject.gestion.dto.InsumoUsadoDTO;
+import com.fitproject.gestion.config.RabbitMQConfig;
+import com.fitproject.gestion.factory.DirectSubmissionEvidenceFactory;
+import com.fitproject.gestion.factory.EvidenceFactory;
+import com.fitproject.gestion.factory.WorkerTaskEvidenceFactory;
+import com.fitproject.gestion.messaging.NotificationEvent;
 import com.fitproject.gestion.model.*;
 import com.fitproject.gestion.repository.*;
 import feign.FeignException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import org.springframework.data.domain.PageRequest;
 
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class EvidenceService {
@@ -26,6 +36,9 @@ public class EvidenceService {
     private final ProjectRepository projectRepository;
     private final ApplicationEventPublisher eventPublisher;
     private final InventarioClient inventarioClient;
+    private final DirectSubmissionEvidenceFactory directSubmissionFactory;
+    private final WorkerTaskEvidenceFactory workerTaskFactory;
+    private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Transactional(readOnly = true)
@@ -34,16 +47,41 @@ public class EvidenceService {
                 .map(this::toDTO).collect(Collectors.toList());
     }
 
+    /**
+     * Retorna evidencias en estado {@code PENDING} con paginación para evitar
+     * cargar toda la tabla en memoria (Green Computing).
+     *
+     * @param page número de página, base cero
+     * @param size cantidad máxima de registros por página
+     * @return lista paginada de evidencias pendientes de aprobación
+     */
     @Transactional(readOnly = true)
-    public List<EvidenceDTO> getPending() {
-        return evidenceRepository.findByStatus(EvidenceStatus.PENDING).stream()
-                .map(this::toDTO).collect(Collectors.toList());
+    public List<EvidenceDTO> getPending(int page, int size) {
+        return evidenceRepository
+                .findByStatus(EvidenceStatus.PENDING, PageRequest.of(page, size))
+                .getContent()
+                .stream()
+                .map(this::toDTO)
+                .collect(Collectors.toList());
     }
 
+    /**
+     * Retorna evidencias asignadas a un trabajador con paginación para optimizar
+     * el consumo de RAM y CPU del servidor (Green Computing).
+     *
+     * @param workerId identificador UUID del trabajador
+     * @param page     número de página, base cero
+     * @param size     cantidad máxima de registros por página
+     * @return lista paginada de evidencias del trabajador
+     */
     @Transactional(readOnly = true)
-    public List<EvidenceDTO> getByWorker(String workerId) {
-        return evidenceRepository.findByAssignedWorkerId(workerId).stream()
-                .map(this::toDTO).collect(Collectors.toList());
+    public List<EvidenceDTO> getByWorker(String workerId, int page, int size) {
+        return evidenceRepository
+                .findByAssignedWorkerId(workerId, PageRequest.of(page, size))
+                .getContent()
+                .stream()
+                .map(this::toDTO)
+                .collect(Collectors.toList());
     }
 
     @Transactional
@@ -54,19 +92,8 @@ public class EvidenceService {
                 .orElseThrow(() -> new IllegalArgumentException("Proyecto no encontrado: " + req.getProjectId()));
 
         boolean isTaskAssignment = req.getAssignedWorkerId() != null && !req.getAssignedWorkerId().isBlank();
-        EvidenceStatus initialStatus = EvidenceStatus.PENDING; // DB constraint only allows PENDING/APPROVED/REJECTED
-
-        Evidence evidence = Evidence.builder()
-                .project(project)
-                .step(step)
-                .evidenceUrl(req.getEvidenceUrl() != null ? req.getEvidenceUrl() : "")
-                .description(req.getDescription() != null ? req.getDescription() : "")
-                .name(req.getName())
-                .submittedBy(req.getSubmittedBy())
-                .assignedWorkerId(isTaskAssignment ? req.getAssignedWorkerId() : null)
-                .assignedWorkerName(isTaskAssignment ? req.getAssignedWorkerName() : null)
-                .status(initialStatus)
-                .build();
+        EvidenceFactory factory = isTaskAssignment ? workerTaskFactory : directSubmissionFactory;
+        Evidence evidence = factory.createEvidence(req, project, step);
 
         Evidence saved = evidenceRepository.save(evidence);
         recalculateStepProgress(step, project);
@@ -147,7 +174,45 @@ public class EvidenceService {
         Project project = projectRepository.findById(step.getProject().getProjectId())
                 .orElseThrow(() -> new IllegalArgumentException("Proyecto no encontrado"));
         recalculateStepProgress(step, project);
+
+        publishEvidenceApprovedEvent(evidence, project);
+
         return toDTO(evidence);
+    }
+
+    /**
+     * Publica un evento {@code evidence.approved} en el Exchange de RabbitMQ.
+     * MS-Notificaciones consume este evento y envía el email al trabajador.
+     *
+     * <p>El email se deriva del identificador {@code submittedBy} ya que Evidence
+     * no almacena el email directamente. En producción se reemplazaría por una
+     * consulta a MS-Users para obtener el email real del trabajador.</p>
+     *
+     * @param evidence evidencia recién aprobada
+     * @param project  proyecto al que pertenece la evidencia
+     */
+    private void publishEvidenceApprovedEvent(Evidence evidence, Project project) {
+        String recipientName = evidence.getAssignedWorkerName() != null
+                ? evidence.getAssignedWorkerName()
+                : evidence.getSubmittedBy();
+        NotificationEvent event = new NotificationEvent(
+                evidence.getSubmittedBy() + "@fitproject.com",
+                recipientName,
+                "Evidencia aprobada: " + evidence.getName(),
+                "Tu evidencia '" + evidence.getName() + "' en el proyecto '"
+                        + project.getModelName() + "' ha sido aprobada por el supervisor.",
+                "EVIDENCE_APPROVED"
+        );
+        try {
+            rabbitTemplate.convertAndSend(
+                    RabbitMQConfig.NOTIFICATIONS_EXCHANGE,
+                    RabbitMQConfig.EVIDENCE_APPROVED_KEY,
+                    event
+            );
+            log.info("[RabbitMQ] Evento EVIDENCE_APPROVED publicado para evidencia {}", evidence.getEvidenceId());
+        } catch (Exception ex) {
+            log.error("[RabbitMQ] Error al publicar EVIDENCE_APPROVED para {}: {}", evidence.getEvidenceId(), ex.getMessage());
+        }
     }
 
     @Transactional

@@ -24,6 +24,12 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
 
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:fit_user}
+    password: ${RABBITMQ_PASS:fit_pass}
+
 services:
   ms-inventario:
     url: ${MS_INVENTARIO_URL:http://localhost:8094/api/v1}
