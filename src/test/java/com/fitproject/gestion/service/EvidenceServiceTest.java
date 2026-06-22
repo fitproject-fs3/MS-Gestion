@@ -240,7 +240,7 @@ class EvidenceServiceTest {
         verify(rabbitTemplate).convertAndSend(
                 eq(RabbitMQConfig.NOTIFICATIONS_EXCHANGE),
                 eq(RabbitMQConfig.EVIDENCE_APPROVED_KEY),
-                any());
+                any(Object.class));
     }
 
     @Test
@@ -270,7 +270,7 @@ class EvidenceServiceTest {
         evidenceService.approve("ev-1", "sup1");
 
         assertThat(step.getProgressValue()).isEqualTo(100);
-        assertThat(step.isStepStatus()).isTrue();
+        assertThat(step.getStepStatus()).isTrue();
     }
 
     @Test
